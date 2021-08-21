@@ -105,3 +105,19 @@ fmt.Println(cst1,cst2,cst3,cst4,cst5,cst6,cst7)
 // 1 2 3 4 5 6 7
 ```
 
+中间指定变量不使用规律
+
+```golang
+const (
+	cst1 = 1 + iota
+	cst2
+	cst3 = 12
+	cst4 = 1 + iota
+	cst5
+	cst6
+	cst7
+)
+
+fmt.Println(cst1,cst2,cst3,cst4,cst5,cst6,cst7)
+// 1 2 12 4 5 6 7
+```
