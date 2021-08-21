@@ -272,6 +272,41 @@ cas指令说明：
 
 将给定值`old`与一个内存地址中的值`val`进行比较，如果相等，则用新值`new`替换内存中的值，这个操作是一个原子操作，这个很重要，`sync.Mutex`实现的基础就是这个原子操作，要不然无法保证上锁的原子性，也就无法对`临界区`的代码进行保护
 
+cas实现源码：
+
+```
+asm_386.s
+TEXT sync·cas(SB), 7, $0
+	MOVL	4(SP), BX
+	MOVL	8(SP), AX
+	MOVL	12(SP), CX
+	LOCK
+	CMPXCHGL	CX, 0(BX)
+	JZ ok
+	MOVL	$0, 16(SP)
+	RET
+ok:
+	MOVL	$1, 16(SP)
+	RET
+```
+
+```
+asm_amd64.s
+TEXT sync·cas(SB), 7, $0
+	MOVQ	8(SP), BX
+	MOVL	16(SP), AX
+	MOVL	20(SP), CX
+	LOCK
+	CMPXCHGL	CX, 0(BX)
+	JZ ok
+	MOVL	$0, 24(SP)
+	RET
+ok:
+	MOVL	$1, 24(SP)
+	RET
+```
+
+
 到此，第一版的`sync.Mutex`实现原理就说完了，以下是需要注意的点：
 
 - `sync.Mutex` 与 `goroutine` 没有关联关系，所以 `sync.Mutex` 并不知道谁在加锁，谁在释放锁，也就是说任何一个`goroutine`都可以加锁，也都可以释放锁，最可怕的是还可以只加锁或只释放锁，所以使用时一定要注意，加锁和释放锁要成对出现，要不然`临界区`代码的原子性将不能被保证
