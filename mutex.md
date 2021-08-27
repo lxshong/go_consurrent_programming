@@ -311,9 +311,103 @@ ok:
 
 - `sync.Mutex` 与 `goroutine` 没有关联关系，所以 `sync.Mutex` 并不知道谁在加锁，谁在释放锁，也就是说任何一个`goroutine`都可以加锁，也都可以释放锁，最可怕的是还可以只加锁或只释放锁，所以使用时一定要注意，加锁和释放锁要成对出现，要不然`临界区`代码的原子性将不能被保证
 
-第一版代码在`commit：d90e7cbac65c5792ce312ee82fbe03a5dfc98c6f`版本上，有兴趣的可以读一下源码
+第一版代码在`commit：d90e7cbac65c5792ce312ee82fbe03a5dfc98c6f`版本上
 
-## 第二版
+## 第二版（给新人多一些机会）
 
 第一版到第二版的升级在 `dd2074c82acda9b50896bf29569ba290a0d13b03` 这次提交中完成的
+
+**结构体**
+
+```golang
+type Mutex struct {
+	state int32
+	sema  uint32
+}
+```
+- sema还是表示信号量。与第一版相同，唯一区别在于在第一版的演进过程中信号量的数据类型由`int32`换成了`uint32`,细思也正常，因为信号量本身就应该是一个非负数，这个转变同时也增大了信号量的上限（虽然不见得用得着）
+- 第一版的key变成了state，而且该标识位表达的含义更复杂了
+    - 第一位：表示锁是否被持有，用locked表示
+    - 第二位：表示是否有唤醒的waiter，用woken表示
+    - 剩余的：表示等待此锁的waiters数量，用waiters表示
+
+![state示意图](./pics/mutex_state.jpg)
+
+**加锁逻辑**
+
+加锁逻辑也变得更加复杂
+
+```golang
+func (m *Mutex) Lock() {
+	// Fast path: grab unlocked mutex.
+	// 先尝试加锁，万一能加上呐
+	if atomic.CompareAndSwapInt32(&m.state, 0, mutexLocked) {
+		return
+	}
+
+	awoke := false
+	for {
+		old := m.state
+		new := old | mutexLocked    // 置 locked 加锁
+		if old&mutexLocked != 0 {   // 如果锁已经别加锁，则 waiters数量 加一
+			new = old + 1<<mutexWaiterShift
+		}
+		if awoke {
+			// The goroutine has been woken from sleep,
+			// so we need to reset the flag in either case.
+			// 如果该协程是被唤醒的waiter，则需要把 woken位置空
+			new &^= mutexWoken
+		}
+		if atomic.CompareAndSwapInt32(&m.state, old, new) {     // 原子操作尝试设置state值
+			if old&mutexLocked == 0 {   // 如果抢到锁，则退出循环，去执行边界代码
+				break
+			}
+			runtime.Semacquire(&m.sema) // 如果没有抢到锁，则进入睡眠
+			awoke = true    // 被唤醒后，开始进入循环抢锁
+		}
+	}
+}
+```
+
+- 该Lock代码有个问题就是：waiter有可能需要等待很长时间都得不到锁，这个时候最好配合超时时间使用，超过指定时间则直接退出加锁逻辑
+
+**解锁逻辑**
+
+```golang
+func (m *Mutex) Unlock() {
+	// Fast path: drop lock bit.
+	// 清除锁状态
+	new := atomic.AddInt32(&m.state, -mutexLocked)
+	if (new+mutexLocked)&mutexLocked == 0 { // 如果锁没有被持有，说明正在对没有被持有的锁进行解锁，panic
+		panic("sync: unlock of unlocked mutex")
+	}
+
+	old := new
+	for {
+		// If there are no waiters or a goroutine has already
+		// been woken or grabbed the lock, no need to wake anyone.
+		// 如果waiters为空，或是锁已经被持有，或是已经有woken，则不需要进行唤醒操作，直接退出即可
+		if old>>mutexWaiterShift == 0 || old&(mutexLocked|mutexWoken) != 0 {
+			return
+		}
+		// Grab the right to wake someone.
+		// waiters数量减一并置woken，如果成功则唤醒waiters，如果不成功，则继续尝试操作
+		new = (old - 1<<mutexWaiterShift) | mutexWoken
+		if atomic.CompareAndSwapInt32(&m.state, old, new) {
+			runtime.Semrelease(&m.sema)
+			return
+		}
+		old = m.state
+	}
+}
+```
+
+**总结**
+
+第二版与第一版的区别在于：
+- 第一版新的goroutine进来后，并不能直接参与抢占锁，而是直接进入排队中，这样对新的goroutine不是很友好，而且新的goroutine很可能正在占用CPU时间分片，这对程序的处理也是不友好的
+- 第二版改变了策略，新的goroutine进来后，可以直接参与锁的抢占，这样新的goroutine抢占到锁的机会就会大大增加，但是也存在一个问题就是，随着新的goroutine的增加，等待队列的增长，在排队中的goroutine会越来越难以抢占到锁，从而造成`饥饿状态`
+
+## 第三版（多一些机会）
+
 
