@@ -410,4 +410,83 @@ func (m *Mutex) Unlock() {
 
 ## 第三版（多一些机会）
 
+第三版要解决的是频繁进入睡眠和唤醒带来的开销。因为对于一些简单的`边界代码`执行花费的时间是非常短的，锁很快就能释放，针对新的goroutine或被唤醒的goroutine，通过`自旋`的方式是一个非常好的优化，`自旋`是通过runtime实现的
+
+**加锁**
+
+```golang 
+func (m *Mutex) Lock() {
+	// Fast path: grab unlocked mutex.
+	if atomic.CompareAndSwapInt32(&m.state, 0, mutexLocked) {
+		if raceenabled {
+			raceAcquire(unsafe.Pointer(m))
+		}
+		return
+	}
+
+	awoke := false
+	iter := 0
+	for {
+		old := m.state
+		new := old | mutexLocked
+		if old&mutexLocked != 0 {
+			if runtime_canSpin(iter) {
+				// Active spinning makes sense.
+				// Try to set mutexWoken flag to inform Unlock
+				// to not wake other blocked goroutines.
+				if !awoke && old&mutexWoken == 0 && old>>mutexWaiterShift != 0 &&
+					atomic.CompareAndSwapInt32(&m.state, old, old|mutexWoken) {
+					awoke = true
+				}
+				runtime_doSpin()
+				iter++
+				continue
+			}
+			new = old + 1<<mutexWaiterShift
+		}
+		if awoke {
+			// The goroutine has been woken from sleep,
+			// so we need to reset the flag in either case.
+			if new&mutexWoken == 0 {
+				panic("sync: inconsistent mutex state")
+			}
+			new &^= mutexWoken
+		}
+		if atomic.CompareAndSwapInt32(&m.state, old, new) {
+			if old&mutexLocked == 0 {
+				break
+			}
+			runtime_Semacquire(&m.sema)
+			awoke = true
+			iter = 0
+		}
+	}
+
+	if raceenabled {
+		raceAcquire(unsafe.Pointer(m))
+	}
+}
+```
+
+加锁逻辑中添加了如下实现自旋的代码块 
+
+```golang
+if runtime_canSpin(iter) {
+	// 如果当前没有被唤醒的goroutine，而且存在排队中的goroutine，尝试设置Woken标志位，以防止Unlock操作唤醒排队中的goroutine
+	// 这样可以提高该goroutine抢占到锁的概率
+	if !awoke && old&mutexWoken == 0 && old>>mutexWaiterShift != 0 &&
+		atomic.CompareAndSwapInt32(&m.state, old, old|mutexWoken) {
+		awoke = true
+	}
+	runtime_doSpin()
+	iter++
+	continue
+}
+```
+
+程序通过`iter`控制自旋的次数，在goroutine被唤醒后，`iter`会被重置为0
+
+## 第四版（解决饥饿）
+
+在第二版的优化中，增加了新goroutine的机会，但是相对的，减少了排队中goroutine的机会，如何能做到尽量公平，就是这版要解决的问题
 
