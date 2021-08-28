@@ -490,3 +490,60 @@ if runtime_canSpin(iter) {
 
 在第二版的优化中，增加了新goroutine的机会，但是相对的，减少了排队中goroutine的机会，如何能做到尽量公平，就是这版要解决的问题
 
+![饥饿模式](./pics/mutex_hunger.jpg)
+
+- 在第四版中，添加了饥饿标记
+
+# 常见的错误场景
+
+- Lock和Unlock不是成对出现
+- copy已使用的mutex
+- 重入
+- 死锁
+
+## Lock和Unlock不是成对出现
+
+- 代码中有太多的if-else分支，可能在某个分支中漏写了Unlock
+- 在重构的时候把Unlock删除了
+- Unlock误写成了Lock
+
+针对这种情况，最好是`边界代码`单独封装在一个方法中，这样加锁的逻辑也会比较简单，减少出错的可能性
+
+## copy已使用的mutex
+
+这里需要先交代一个知识点：Package sync 的同步原语在使用后是不能复制的。因为Mutex是一个有状态的对象，它的state字段记录了这个锁的状态，如果进行了复制，有可能新的变量初始化就是带着状态的
+
+```golang
+package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+type Counter struct {
+	sync.Mutex
+	count int
+}
+
+func (c *Counter) Foo() {
+	defer c.Unlock()
+	c.Lock()
+	c.Inc()
+	fmt.Println(c.count)
+}
+
+func (c *Counter) Inc()  {
+	defer c.Unlock()
+	c.Lock()
+	c.count++
+}
+
+func main() {
+	counter := Counter{}
+	counter.Foo()
+}
+
+// fatal error: all goroutines are asleep - deadlock!
+```
+
