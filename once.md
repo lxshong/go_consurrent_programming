@@ -228,5 +228,42 @@ func Test() {
 
 
 
+## 实现原理
 
+```golang
+
+package sync
+
+import (
+	"sync/atomic"
+)
+
+type Once struct {
+
+	done uint32
+	m    Mutex
+}
+
+func (o *Once) Do(f func()) {
+
+	if atomic.LoadUint32(&o.done) == 0 {
+
+		o.doSlow(f)
+	}
+}
+
+func (o *Once) doSlow(f func()) {
+	o.m.Lock()
+	defer o.m.Unlock()
+	if o.done == 0 {
+		defer atomic.StoreUint32(&o.done, 1)
+		f()
+	}
+}
+
+```
+
+once 的实现原理比较简单，通过一个标识位`done`判断`f`是否执行过，但是它这里使用了`双检测机制`，这个是为了解决避免所有协程进来后，都先陷入争抢锁的队列中，如果标识位`done == 1` 的话，协程就没必要往下执行了；使用`互斥锁`是为了避免`f`被重复执行；而这里执行完`f`再把`done`置为1，是为了防止，如果`f`方法执行时间比较长，当其他协程判断`done == 1`以后，就直接去调用单例，这时候单例可能还没有初始化完成。
+
+通过这几点的设计，可以看出，底层的设计是很巧妙的
 
